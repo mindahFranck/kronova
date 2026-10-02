@@ -172,6 +172,21 @@ jobs:
 
             docker pull "$NOUVELLE"
 
+            # Let's Encrypt emet un seul certificat pour tous les noms demandes :
+            # si `www` pointe encore ailleurs, la validation echoue et AUCUN
+            # certificat n'est emis. On n'inclut donc `www` que s'il pointe deja
+            # vers le meme serveur ; il sera ajoute au deploiement suivant.
+            IP_APEX=$(getent ahostsv4 ${{ env.WEB_HOST }} | awk 'NR==1{print $1}')
+            IP_WWW=$(getent ahostsv4 www.${{ env.WEB_HOST }} | awk 'NR==1{print $1}')
+            if [ -n "$IP_WWW" ] && [ "$IP_WWW" = "$IP_APEX" ]; then
+              CERT_HOSTS='${{ env.WEB_HOST }},www.${{ env.WEB_HOST }}'
+            else
+              CERT_HOSTS='${{ env.WEB_HOST }}'
+              echo "  avertissement : www.${{ env.WEB_HOST }} pointe vers ${IP_WWW:-rien} et non $IP_APEX :"
+              echo "  certificat emis pour ${{ env.WEB_HOST }} seulement (corriger le CNAME www chez Amen)"
+            fi
+            echo "▸ Certificat demande pour : $CERT_HOSTS"
+
             demarrer() {
               docker rm -f ${{ env.APP_CONTAINER }} 2>/dev/null || true
               docker run -d \
@@ -181,7 +196,7 @@ jobs:
                 --user 1000:1000 \
                 -e VIRTUAL_HOST='${{ env.WEB_HOST }},www.${{ env.WEB_HOST }}' \
                 -e VIRTUAL_PORT=3000 \
-                -e LETSENCRYPT_HOST='${{ env.WEB_HOST }},www.${{ env.WEB_HOST }}' \
+                -e LETSENCRYPT_HOST="$CERT_HOSTS" \
                 -e LETSENCRYPT_EMAIL='${{ secrets.LETSENCRYPT_EMAIL }}' \
                 -e NODE_ENV=production \
                 -e PORT=3000 \
