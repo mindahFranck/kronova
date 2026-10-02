@@ -89,22 +89,27 @@ jobs:
         # sans jamais afficher les valeurs.
         env:
           H: ${{ secrets.SSH_HOST || vars.SSH_HOST }}
-          U: ${{ secrets.SSH_USER || vars.SSH_USER }}
+          U: ${{ secrets.SSH_USER || vars.SSH_USER || secrets.SERVER_USER || vars.SERVER_USER }}
           P: ${{ secrets.SSH_PASSWORD }}
           P_VAR: ${{ vars.SSH_PASSWORD }}
         run: |
           echo "SSH_HOST     : $([ -n "$H" ] && echo "renseigne ($H)" || echo ABSENT)"
           echo "SSH_USER     : $([ -n "$U" ] && echo "renseigne ($U)" || echo ABSENT)"
           echo "SSH_PASSWORD : $([ -n "$P" ] && echo "renseigne (${#P} caracteres)" || echo ABSENT)"
-          [ -n "$P_VAR" ] && echo "ATTENTION : SSH_PASSWORD est dans l'onglet Variables (lisible en clair) : deplacez-le dans Secrets."
+          if [ -n "$P_VAR" ]; then
+            echo "ATTENTION : SSH_PASSWORD est dans l'onglet Variables (lisible en clair) : deplacez-le dans Secrets."
+          fi
           case "$P" in *[[:space:]]) echo "ATTENTION : SSH_PASSWORD se termine par un espace ou un retour a la ligne." ;; esac
-          [ -n "$H" ] && [ -n "$U" ] && [ -n "$P" ] || { echo "Parametre SSH manquant"; exit 1; }
+          if [ -z "$H" ] || [ -z "$U" ] || [ -z "$P" ]; then
+            echo "Parametre SSH manquant (SSH_USER est aussi accepte sous le nom SERVER_USER)"
+            exit 1
+          fi
 
       - name: Preparer le serveur
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.SSH_HOST || vars.SSH_HOST }}
-          username: ${{ secrets.SSH_USER || vars.SSH_USER }}
+          username: ${{ secrets.SSH_USER || vars.SSH_USER || secrets.SERVER_USER || vars.SERVER_USER }}
           password: ${{ secrets.SSH_PASSWORD }}
           port: ${{ secrets.SSH_PORT || vars.SSH_PORT || 22 }}
           script: |
@@ -154,7 +159,7 @@ jobs:
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.SSH_HOST || vars.SSH_HOST }}
-          username: ${{ secrets.SSH_USER || vars.SSH_USER }}
+          username: ${{ secrets.SSH_USER || vars.SSH_USER || secrets.SERVER_USER || vars.SERVER_USER }}
           password: ${{ secrets.SSH_PASSWORD }}
           port: ${{ secrets.SSH_PORT || vars.SSH_PORT || 22 }}
           command_timeout: 10m
@@ -257,7 +262,7 @@ jobs:
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.SSH_HOST || vars.SSH_HOST }}
-          username: ${{ secrets.SSH_USER || vars.SSH_USER }}
+          username: ${{ secrets.SSH_USER || vars.SSH_USER || secrets.SERVER_USER || vars.SERVER_USER }}
           password: ${{ secrets.SSH_PASSWORD }}
           port: ${{ secrets.SSH_PORT || vars.SSH_PORT || 22 }}
           script: |
