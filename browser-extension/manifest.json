@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "Kronova — Bouclier anti-distraction",
+  "version": "2.0.0",
+  "description": "Bloque les sites de distraction dans tous les onglets pendant vos sessions de concentration Kronova.",
+  "permissions": ["tabs", "alarms", "storage", "declarativeNetRequest"],
+  "host_permissions": ["<all_urls>"],
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    {
+      "matches": ["https://kro-nova.com/*", "https://www.kro-nova.com/*", "http://localhost:3000/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    { "resources": ["blocked.html", "blocked.js"], "matches": ["<all_urls>"] }
+  ]
+}

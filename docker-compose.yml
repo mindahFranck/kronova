@@ -1,0 +1,18 @@
+# Lancement local de l'image de production (le déploiement serveur passe par
+# .github/workflows/deploy-production.yml).
+#   docker compose up --build   →   http://localhost:3001
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+    ports:
+      - "3001:3000"
+    volumes:
+      - app-data:/app/data
+
+volumes:
+  app-data:

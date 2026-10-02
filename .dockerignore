@@ -1,0 +1,8 @@
+node_modules
+dist
+data
+public/downloads
+.env
+.env.*
+!.env.example
+*.log

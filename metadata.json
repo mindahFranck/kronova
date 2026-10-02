@@ -1,0 +1,8 @@
+{
+  "name": "Kronova — Le temps, un nouvel élan",
+  "description": "Kronova — fusion de chronos (le temps) et nova (un nouvel élan) : minuteur Pomodoro, tâches, journal de concentration et assistant vocal IA.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
