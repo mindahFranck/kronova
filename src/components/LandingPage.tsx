@@ -1,4 +1,5 @@
 import React from 'react';
+import Galaxy from './galaxy/Galaxy';
 import {
   Timer,
   Shield,
@@ -58,6 +59,9 @@ const STEPS = [
   { title: 'Faites le point', text: 'Le journal mesure vos progrès jour après jour et révèle vos meilleurs créneaux.' },
 ];
 
+const prefersReducedMotion =
+  typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
 export const LandingPage: React.FC<LandingPageProps> = ({
   darkMode,
   onToggleDarkMode,
@@ -89,8 +93,29 @@ export const LandingPage: React.FC<LandingPageProps> = ({
     </header>
 
     <main className="flex-1">
-      {/* Hero */}
-      <section className="max-w-6xl mx-auto px-4 sm:px-6 pt-16 sm:pt-24 pb-16 text-center">
+      {/* Hero sur fond étoilé (nova) */}
+      <div className="relative overflow-hidden">
+        <div
+          aria-hidden="true"
+          className={`absolute inset-0 [mask-image:radial-gradient(ellipse_at_center,black_45%,transparent_85%)] ${
+            darkMode ? '' : 'opacity-70'
+          }`}
+        >
+          <Galaxy
+            key={darkMode ? 'dark' : 'light'}
+            lightMode={!darkMode}
+            density={darkMode ? 1.2 : 0.9}
+            glowIntensity={darkMode ? 0.35 : 0.14}
+            saturation={0.35}
+            hueShift={220}
+            twinkleIntensity={0.4}
+            rotationSpeed={0.05}
+            starSpeed={0.4}
+            repulsionStrength={1.5}
+            disableAnimation={prefersReducedMotion}
+          />
+        </div>
+      <section className="relative max-w-6xl mx-auto px-4 sm:px-6 pt-16 sm:pt-24 pb-16 text-center">
         <p className="text-xs font-medium uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
           Chronos · le temps — Nova · un nouvel élan
         </p>
@@ -121,6 +146,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
           </button>
         </div>
       </section>
+      </div>
 
       {/* Fonctionnalités */}
       <section aria-labelledby="landing-features" className="max-w-6xl mx-auto px-4 sm:px-6 pb-20">
