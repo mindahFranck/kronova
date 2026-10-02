@@ -104,6 +104,7 @@ jobs:
               -e GEMINI_API_KEY="${{ secrets.GEMINI_API_KEY }}" \
               -e SIGNUP_CODE="${{ secrets.SIGNUP_CODE }}" \
               -e ALLOWED_EMAIL_DOMAINS="${{ secrets.ALLOWED_EMAIL_DOMAINS }}" \
+              -e GOOGLE_CLIENT_ID="${{ secrets.GOOGLE_CLIENT_ID }}" \
               -v /var/kronova/data:/app/data \
               ${{ env.APP_IMAGE }}:${{ github.sha }}
 

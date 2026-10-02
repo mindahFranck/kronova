@@ -6,7 +6,7 @@ import fs from 'fs';
 import crypto from 'crypto';
 import mongoose from 'mongoose';
 import { WebSocketServer, WebSocket } from 'ws';
-import { GoogleGenAI, LiveServerMessage, Modality } from '@google/genai';
+import { GoogleGenAI, LiveServerMessage, Modality, Type, type FunctionDeclaration, type FunctionResponse } from '@google/genai';
 
 // Tolère des guillemets résiduels (ex. docker --env-file avec un .env entre guillemets)
 for (const [key, value] of Object.entries(process.env)) {
@@ -37,6 +37,8 @@ const userStateSchema = new mongoose.Schema(
     tasks: { type: Array, default: [] },
     sessions: { type: Array, default: [] },
     settings: { type: Object, default: {} },
+    // Projets, routines, notes « Vide-Esprit » et planning de la journée
+    workspace: { type: Object, default: {} },
     revision: { type: Number, default: 0 },
     lastClientId: { type: String, default: null },
     updatedAt: { type: Date, default: Date.now },
@@ -65,6 +67,7 @@ interface UserState {
   tasks: unknown[];
   sessions: unknown[];
   settings: Record<string, unknown>;
+  workspace: Record<string, unknown>;
 }
 
 interface PublicUser {
@@ -149,6 +152,7 @@ function startChangeStream() {
           tasks: doc.tasks || [],
           sessions: doc.sessions || [],
           settings: doc.settings || {},
+          workspace: doc.workspace || {},
         },
         revision: doc.revision || 0,
         originClientId: doc.lastClientId || null,
@@ -311,6 +315,10 @@ function sanitizeState(input: Partial<UserState> | undefined): UserState {
     settings:
       input?.settings && typeof input.settings === 'object' && !Array.isArray(input.settings)
         ? input.settings
+        : {},
+    workspace:
+      input?.workspace && typeof input.workspace === 'object' && !Array.isArray(input.workspace)
+        ? input.workspace
         : {},
   };
 }
@@ -563,6 +571,11 @@ async function startServer() {
   // 1. Database status
   app.get('/api/db/status', (_req, res) => {
     res.json(getDbStatus());
+  });
+
+  // Configuration publique du client (intégrations optionnelles)
+  app.get('/api/config', (_req, res) => {
+    res.json({ googleClientId: process.env.GOOGLE_CLIENT_ID || null });
   });
 
   // Sonde de santé (Docker HEALTHCHECK / vérification du déploiement)
@@ -846,6 +859,136 @@ async function startServer() {
   // --- Gemini Live API (gemini-3.8-live) WebSocket Bridge ---
   const wss = new WebSocketServer({ noServer: true });
 
+  // Outils de pilotage vocal : exécutés côté navigateur, relayés par ce pont.
+  const LIVE_TOOLS: FunctionDeclaration[] = [
+    {
+      name: 'start_focus',
+      description:
+        "Démarre une session de concentration (Pomodoro). Si un titre de tâche est donné, la tâche est sélectionnée (ou créée si elle n'existe pas).",
+      parameters: {
+        type: Type.OBJECT,
+        properties: {
+          minutes: { type: Type.INTEGER, description: 'Durée en minutes (1 à 180). Par défaut : durée configurée.', minimum: 1, maximum: 180 },
+          task_title: { type: Type.STRING, description: 'Titre de la tâche sur laquelle se concentrer.' },
+        },
+      },
+    },
+    { name: 'pause_timer', description: 'Met le minuteur en pause.' },
+    { name: 'resume_timer', description: 'Reprend le minuteur en pause.' },
+    { name: 'skip_phase', description: 'Passe à la phase suivante (concentration → pause, ou pause → concentration).' },
+    { name: 'reset_timer', description: 'Réinitialise le minuteur de la phase en cours.' },
+    {
+      name: 'start_break',
+      description: 'Démarre une pause.',
+      parameters: {
+        type: Type.OBJECT,
+        properties: {
+          kind: { type: Type.STRING, enum: ['short', 'long'], format: 'enum', description: 'Pause courte (short) ou longue (long). Par défaut : courte.' },
+        },
+      },
+    },
+    {
+      name: 'add_task',
+      description: 'Ajoute une tâche à la liste.',
+      parameters: {
+        type: Type.OBJECT,
+        properties: {
+          title: { type: Type.STRING, description: 'Titre de la tâche.' },
+          estimated_pomodoros: { type: Type.INTEGER, description: 'Nombre de Pomodoros estimés.', minimum: 1, maximum: 20 },
+          category: { type: Type.STRING, description: 'Catégorie ou projet de la tâche.' },
+          due: { type: Type.STRING, enum: ['today', 'tomorrow'], format: 'enum', description: "Échéance : aujourd'hui (today) ou demain (tomorrow)." },
+        },
+        required: ['title'],
+      },
+    },
+    {
+      name: 'complete_task',
+      description: 'Marque une tâche comme terminée (le titre peut être approximatif).',
+      parameters: {
+        type: Type.OBJECT,
+        properties: { title: { type: Type.STRING, description: 'Titre (approximatif) de la tâche.' } },
+        required: ['title'],
+      },
+    },
+    {
+      name: 'get_status',
+      description:
+        "Renvoie l'état actuel : phase, temps restant, tâche active, Pomodoros réalisés aujourd'hui et objectif du jour.",
+    },
+  ];
+  const LIVE_TOOL_NAMES = new Set(LIVE_TOOLS.map((t) => t.name as string));
+  const TOOL_TIMEOUT_MS = 8000;
+  const MAX_TOOL_RESPONSE_BYTES = 8 * 1024;
+
+  /** Corrèle les appels d'outils Gemini avec les réponses du navigateur (id + délai). */
+  function createToolRelay(opts: {
+    sendToClient: (payload: unknown) => boolean;
+    respond: (responses: FunctionResponse[]) => void;
+    timeoutMs?: number;
+  }) {
+    const pending = new Map<string, { name: string; timer: ReturnType<typeof setTimeout> }>();
+    let seq = 0;
+    const finish = (id: string, response: Record<string, unknown>) => {
+      const entry = pending.get(id);
+      if (!entry) return false;
+      clearTimeout(entry.timer);
+      pending.delete(id);
+      opts.respond([{ id, name: entry.name, response }]);
+      return true;
+    };
+    return {
+      pendingCount: () => pending.size,
+      handleCalls(calls: { id?: string; name?: string; args?: Record<string, unknown> }[]) {
+        for (const call of calls) {
+          const name = typeof call.name === 'string' ? call.name : '';
+          const id = typeof call.id === 'string' && call.id ? call.id : `call-${Date.now()}-${++seq}`;
+          if (!LIVE_TOOL_NAMES.has(name)) {
+            opts.respond([{ id, name, response: { ok: false, error: 'outil inconnu' } }]);
+            continue;
+          }
+          const timer = setTimeout(() => finish(id, { ok: false, error: 'timeout' }), opts.timeoutMs ?? TOOL_TIMEOUT_MS);
+          pending.set(id, { name, timer });
+          const args = call.args && typeof call.args === 'object' ? call.args : {};
+          if (!opts.sendToClient({ toolCall: { id, name, args } })) {
+            finish(id, { ok: false, error: 'client déconnecté' });
+          }
+        }
+      },
+      handleClientResponse(raw: unknown) {
+        if (!raw || typeof raw !== 'object') return false;
+        const { id, response } = raw as { id?: unknown; response?: unknown };
+        if (typeof id !== 'string' || id.length > 256 || !pending.has(id)) return false;
+        let safe: Record<string, unknown> =
+          response && typeof response === 'object' && !Array.isArray(response)
+            ? (response as Record<string, unknown>)
+            : { ok: false, error: 'réponse invalide' };
+        try {
+          if (Buffer.byteLength(JSON.stringify(safe)) > MAX_TOOL_RESPONSE_BYTES) {
+            safe = { ok: false, error: 'réponse trop volumineuse' };
+          }
+        } catch {
+          safe = { ok: false, error: 'réponse non sérialisable' };
+        }
+        return finish(id, safe);
+      },
+      cancel(ids: string[]) {
+        const cancelled: string[] = [];
+        for (const id of ids) {
+          const entry = pending.get(id);
+          if (!entry) continue;
+          clearTimeout(entry.timer);
+          pending.delete(id);
+          cancelled.push(id);
+        }
+        return cancelled;
+      },
+      dispose() {
+        for (const entry of pending.values()) clearTimeout(entry.timer);
+        pending.clear();
+      },
+    };
+  }
+
   server.on('upgrade', (request, socket, head) => {
     const pathname = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`).pathname;
     if (pathname === '/live') {
@@ -882,6 +1025,20 @@ async function startServer() {
 
     const ai = new GoogleGenAI({ apiKey });
     let liveSession: Awaited<ReturnType<typeof ai.live.connect>> | null = null;
+    const toolRelay = createToolRelay({
+      sendToClient: (payload) => {
+        if (clientWs.readyState !== WebSocket.OPEN) return false;
+        clientWs.send(JSON.stringify(payload));
+        return true;
+      },
+      respond: (functionResponses) => {
+        try {
+          liveSession?.sendToolResponse({ functionResponses });
+        } catch (err) {
+          console.error('Error sending tool response to Live session:', err);
+        }
+      },
+    });
 
     try {
       liveSession = await ai.live.connect({
@@ -897,7 +1054,9 @@ async function startServer() {
             "Ne ramène pas la conversation vers la concentration, la productivité ou la méthode Pomodoro, sauf si l'utilisateur le demande.",
             `Contexte, à n'utiliser que si l'utilisateur en parle : phase « ${contextPhase} », tâche « ${contextTask} ».`,
             "Réponds dans la langue de l'utilisateur (français par défaut), de façon naturelle, vivante et sans détour.",
+            "Quand l'utilisateur te le demande, tu peux piloter Kronova avec tes outils (minuteur, pauses, tâches, état) ; confirme alors brièvement l'action effectuée.",
           ].join(' '),
+          tools: [{ functionDeclarations: LIVE_TOOLS }],
         },
         callbacks: {
           onopen: () => {
@@ -921,6 +1080,17 @@ async function startServer() {
 
             if (message.serverContent?.interrupted) {
               clientWs.send(JSON.stringify({ interrupted: true }));
+            }
+
+            const functionCalls = message.toolCall?.functionCalls;
+            if (functionCalls?.length) {
+              toolRelay.handleCalls(functionCalls);
+            }
+
+            const cancelledIds = message.toolCallCancellation?.ids;
+            if (cancelledIds?.length) {
+              const ids = toolRelay.cancel(cancelledIds);
+              if (ids.length) clientWs.send(JSON.stringify({ toolCallCancellation: { ids } }));
             }
           },
           onerror: (err: unknown) => {
@@ -957,8 +1127,12 @@ async function startServer() {
 
     clientWs.on('message', (raw) => {
       try {
-        const parsed = JSON.parse(raw.toString()) as { audio?: string; text?: string };
-        if (parsed.audio && liveSession) {
+        const parsed = JSON.parse(raw.toString()) as { audio?: unknown; text?: string; toolResponse?: unknown };
+        if (parsed.toolResponse !== undefined) {
+          toolRelay.handleClientResponse(parsed.toolResponse);
+          return;
+        }
+        if (typeof parsed.audio === 'string' && parsed.audio && liveSession) {
           liveSession.sendRealtimeInput({
             audio: {
               data: parsed.audio,
@@ -972,6 +1146,7 @@ async function startServer() {
     });
 
     clientWs.on('close', () => {
+      toolRelay.dispose();
       try {
         liveSession?.close();
       } catch {

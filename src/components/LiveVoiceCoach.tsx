@@ -1,11 +1,39 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Mic, MicOff, Volume2, Loader2, Radio } from 'lucide-react';
 
+/** Commandes vocales que l'assistant peut déclencher (function calling Gemini Live). */
+export type VoiceCommandName =
+  | 'start_focus'
+  | 'pause_timer'
+  | 'resume_timer'
+  | 'skip_phase'
+  | 'reset_timer'
+  | 'start_break'
+  | 'add_task'
+  | 'complete_task'
+  | 'get_status';
+
+/**
+ * Résultat renvoyé à l'assistant. `ok` et `error` guident sa réponse ;
+ * `summary` (optionnel) alimente le journal visible sous la carte.
+ */
+export type VoiceCommandResult = Record<string, unknown>;
+
 interface LiveVoiceCoachProps {
   currentTaskTitle: string | null;
   currentPhaseLabel: string;
   isMaxFocusActive: boolean;
   authToken: string | null;
+  onVoiceCommand?: (
+    name: string,
+    args: Record<string, unknown>
+  ) => Promise<VoiceCommandResult> | VoiceCommandResult;
+}
+
+interface VoiceLogEntry {
+  key: number;
+  ok: boolean;
+  text: string;
 }
 
 function float32ToPcm16Base64(float32Array: Float32Array): string {
@@ -42,7 +70,13 @@ export const LiveVoiceCoach: React.FC<LiveVoiceCoachProps> = ({
   currentPhaseLabel,
   isMaxFocusActive,
   authToken,
+  onVoiceCommand,
 }) => {
+  const [voiceLog, setVoiceLog] = useState<VoiceLogEntry[]>([]);
+  const onVoiceCommandRef = useRef(onVoiceCommand);
+  onVoiceCommandRef.current = onVoiceCommand;
+  const logKeyRef = useRef(0);
+
   const [status, setStatus] = useState<'idle' | 'connecting' | 'connected' | 'error'>('idle');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isModelSpeaking, setIsModelSpeaking] = useState<boolean>(false);
@@ -143,6 +177,42 @@ export const LiveVoiceCoach: React.FC<LiveVoiceCoachProps> = ({
     };
   }, []);
 
+  const handleToolCall = async (
+    ws: WebSocket,
+    call: { id?: unknown; name?: unknown; args?: unknown }
+  ) => {
+    if (typeof call.id !== 'string' || typeof call.name !== 'string') return;
+    const args =
+      call.args && typeof call.args === 'object' && !Array.isArray(call.args)
+        ? (call.args as Record<string, unknown>)
+        : {};
+    const handler = onVoiceCommandRef.current;
+    let response: VoiceCommandResult;
+    if (!handler) {
+      response = { ok: false, error: 'commande non disponible' };
+    } else {
+      try {
+        const result = await handler(call.name, args);
+        response = result && typeof result === 'object' ? result : { ok: true };
+      } catch (err) {
+        response = { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    }
+
+    if (typeof response.summary === 'string' && response.summary.trim()) {
+      const entry: VoiceLogEntry = {
+        key: ++logKeyRef.current,
+        ok: response.ok !== false,
+        text: response.summary.trim().slice(0, 140),
+      };
+      setVoiceLog((prev) => [entry, ...prev].slice(0, 3));
+    }
+
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ toolResponse: { id: call.id, name: call.name, response } }));
+    }
+  };
+
   const startLiveConversation = async () => {
     setErrorMessage(null);
     setStatus('connecting');
@@ -185,7 +255,13 @@ export const LiveVoiceCoach: React.FC<LiveVoiceCoachProps> = ({
             audio?: string;
             interrupted?: boolean;
             error?: string;
+            toolCall?: { id?: unknown; name?: unknown; args?: unknown };
           };
+
+          if (msg.toolCall) {
+            void handleToolCall(ws, msg.toolCall);
+            return;
+          }
 
           if (msg.error) {
             setErrorMessage(msg.error);
@@ -346,6 +422,30 @@ export const LiveVoiceCoach: React.FC<LiveVoiceCoachProps> = ({
         <p className="mt-3 text-xs text-rose-600 dark:text-rose-400 border-t border-neutral-100 dark:border-slate-800 pt-2.5">
           {errorMessage}
         </p>
+      )}
+
+      {voiceLog.length > 0 && (
+        <ul
+          aria-label="Dernières actions vocales"
+          aria-live="polite"
+          className="mt-3 border-t border-neutral-100 dark:border-slate-800 pt-2.5 space-y-1"
+        >
+          {voiceLog.map((entry) => (
+            <li
+              key={entry.key}
+              className="text-xs text-slate-500 dark:text-slate-400 truncate"
+              title={entry.text}
+            >
+              <span
+                aria-hidden="true"
+                className={entry.ok ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}
+              >
+                {entry.ok ? '✓' : '✕'}
+              </span>{' '}
+              {entry.text}
+            </li>
+          ))}
+        </ul>
       )}
     </div>
   );

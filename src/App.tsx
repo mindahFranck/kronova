@@ -32,6 +32,12 @@ import {
   Maximize2,
   Lock,
   User,
+  PictureInPicture2,
+  NotebookPen,
+  ChevronRight,
+  StickyNote,
+  FileText,
+  MonitorDown,
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -50,6 +56,8 @@ import {
   PomodoroTask,
   SessionRecord,
   TimerSettings,
+  Workspace,
+  RoutineTemplate,
 } from './types';
 import { playTactileClick, playSoftTick, playCompletionChime } from './utils/sound';
 import {
@@ -69,6 +77,27 @@ import {
   PRESET_DISTRACTION_SITES,
 } from './data/quotes';
 import { LiveVoiceCoach } from './components/LiveVoiceCoach';
+import { LandingPage } from './components/LandingPage';
+import { AmbientMixer } from './components/AmbientMixer';
+import { GoogleSyncPanel } from './components/GoogleSyncPanel';
+import FocusHeatmap from './components/stats/FocusHeatmap';
+import ProjectBreakdownChart from './components/stats/ProjectBreakdownChart';
+import FocusInsights from './components/stats/FocusInsights';
+import { openFocusReport } from './utils/report';
+import { useInstallPrompt } from './utils/pwa';
+import {
+  DayPlanner,
+  ProjectDot,
+  ProjectManager,
+  RoutinesPanel,
+  TaskDetailPanel,
+} from './components/tasks/TaskPanels';
+import {
+  BrainDumpModal,
+  DailyGoalCard,
+  PipTimer,
+  usePictureInPicture,
+} from './components/FocusExtras';
 import {
   MongoAuthModal,
   AuthenticatedUser,
@@ -79,6 +108,7 @@ import {
 const STORAGE_KEYS = {
   TASKS: 'cadence_pomodoro_tasks_v1',
   SESSIONS: 'cadence_pomodoro_sessions_v1',
+  WORKSPACE: 'kronova_workspace_v1',
   SETTINGS: 'cadence_pomodoro_settings_v1',
   THEME: 'cadence_pomodoro_theme_v1',
   AUTH_TOKEN: 'cadence_pomodoro_mongo_token_v1',
@@ -117,6 +147,13 @@ function withoutDemoEntries<T extends { id: string }>(items: T[]): T[] {
   return items.filter((item) => !DEMO_ID_PATTERN.test(item.id));
 }
 
+interface RemoteState {
+  tasks?: PomodoroTask[];
+  sessions?: SessionRecord[];
+  settings?: Partial<TimerSettings>;
+  workspace?: Partial<Workspace>;
+}
+
 interface BlockerInfo {
   active: boolean;
   domains: string[];
@@ -124,6 +161,17 @@ interface BlockerInfo {
   attempts: number;
   lastAttempt: { domain: string; at: number } | null;
   extensionConnected: boolean;
+}
+
+const EMPTY_WORKSPACE: Workspace = { projects: [], routines: [], notes: [], dayPlan: [] };
+
+function normalizeWorkspace(raw: Partial<Workspace> | null | undefined): Workspace {
+  return {
+    projects: Array.isArray(raw?.projects) ? raw!.projects : [],
+    routines: Array.isArray(raw?.routines) ? raw!.routines : [],
+    notes: Array.isArray(raw?.notes) ? raw!.notes : [],
+    dayPlan: Array.isArray(raw?.dayPlan) ? raw!.dayPlan : [],
+  };
 }
 
 // Index aléatoire dans [0, length), différent de `exclude` quand c'est possible
@@ -202,6 +250,16 @@ export default function App() {
     }
   });
 
+  // Projets, routines, notes rapides et planning de la journée
+  const [workspace, setWorkspace] = useState<Workspace>(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEYS.WORKSPACE);
+      return saved ? normalizeWorkspace(JSON.parse(saved)) : EMPTY_WORKSPACE;
+    } catch {
+      return EMPTY_WORKSPACE;
+    }
+  });
+
   // Navigation & UI state
   const [activeView, setActiveView] = useState<ActiveView>(ActiveView.WORKSPACE);
   const [phase, setPhase] = useState<TimerPhase>(TimerPhase.FOCUS);
@@ -225,6 +283,23 @@ export default function App() {
   const [phaseBanner, setPhaseBanner] = useState<{ title: string; body: string } | null>(null);
 
   // Productivity quote index (updated on each new focus session)
+  // Interruptions (sorties d'onglet, sites bloqués) pendant la session de concentration en cours
+  const sessionInterruptionsRef = useRef(0);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [newTaskProjectId, setNewTaskProjectId] = useState<string>('');
+  const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
+  const [isBrainDumpOpen, setIsBrainDumpOpen] = useState<boolean>(false);
+  const [googleClientId, setGoogleClientId] = useState<string | null>(null);
+  const pip = usePictureInPicture();
+  const installPrompt = useInstallPrompt();
+
+  useEffect(() => {
+    fetch('/api/config')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((config) => setGoogleClientId(config?.googleClientId || null))
+      .catch(() => {});
+  }, []);
+
   const [quoteIndex, setQuoteIndex] = useState<number>(() =>
     randomIndex(PRODUCTIVITY_QUOTES.length)
   );
@@ -267,6 +342,7 @@ export default function App() {
   const [syncStatus, setSyncStatus] = useState<SyncStatus>('idle');
   const [isLiveConnected, setIsLiveConnected] = useState<boolean>(false);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState<boolean>(false);
+  const [authModalMode, setAuthModalMode] = useState<'login' | 'register'>('login');
 
   // Identifiant de cet onglet : permet d'ignorer l'écho de nos propres écritures dans le flux live
   const clientIdRef = useRef<string>(
@@ -274,8 +350,8 @@ export default function App() {
   );
   // Dernier état (JSON) connu comme identique à la base ; null tant qu'aucun instantané n'a été reçu
   const lastSyncedJsonRef = useRef<string | null>(null);
-  const latestStateRef = useRef({ tasks, sessions, settings });
-  latestStateRef.current = { tasks, sessions, settings };
+  const latestStateRef = useRef({ tasks, sessions, settings, workspace });
+  latestStateRef.current = { tasks, sessions, settings, workspace };
   const authTokenRef = useRef<string | null>(authToken);
   authTokenRef.current = authToken;
   const retryTimeoutRef = useRef<number | null>(null);
@@ -299,25 +375,29 @@ export default function App() {
 
   // Applique l'état venant de MongoDB (la base fait foi) sans le renvoyer au serveur
   const applyRemoteState = useCallback(
-    (state: { tasks?: PomodoroTask[]; sessions?: SessionRecord[]; settings?: Partial<TimerSettings> }) => {
+    (state: RemoteState) => {
       const rawTasks = Array.isArray(state.tasks) ? state.tasks : [];
       const rawSessions = Array.isArray(state.sessions) ? state.sessions : [];
       const nextSettings = { ...DEFAULT_SETTINGS, ...(state.settings || {}) };
+      const nextWorkspace = normalizeWorkspace(state.workspace);
       const next = {
         tasks: withoutDemoEntries(rawTasks),
         sessions: withoutDemoEntries(rawSessions),
         settings: nextSettings,
+        workspace: nextWorkspace,
       };
       // Si des entrées de démo ont été retirées, l'écart est détecté et la base est nettoyée
       lastSyncedJsonRef.current = JSON.stringify({
         tasks: rawTasks,
         sessions: rawSessions,
         settings: nextSettings,
+        workspace: nextWorkspace,
       });
       if (JSON.stringify(next) === JSON.stringify(latestStateRef.current)) return;
       setTasks(next.tasks);
       setSessions(next.sessions);
       setSettings(next.settings);
+      setWorkspace(next.workspace);
     },
     []
   );
@@ -390,7 +470,7 @@ export default function App() {
     source.addEventListener('state', (e) => {
       const payload = JSON.parse((e as MessageEvent).data) as {
         user?: AuthenticatedUser;
-        state: { tasks?: PomodoroTask[]; sessions?: SessionRecord[]; settings?: Partial<TimerSettings> };
+        state: RemoteState;
         originClientId: string | null;
         snapshot?: boolean;
         updatedAt?: string;
@@ -421,11 +501,11 @@ export default function App() {
   // Sauvegarde automatique (debounce) des tâches, sessions et réglages dans MongoDB
   useEffect(() => {
     if (!authToken || !currentUser || lastSyncedJsonRef.current === null) return;
-    if (JSON.stringify({ tasks, sessions, settings }) === lastSyncedJsonRef.current) return;
+    if (JSON.stringify({ tasks, sessions, settings, workspace }) === lastSyncedJsonRef.current) return;
     setSyncStatus('saving');
     const timeout = window.setTimeout(flushState, 500);
     return () => window.clearTimeout(timeout);
-  }, [tasks, sessions, settings, authToken, currentUser, flushState]);
+  }, [tasks, sessions, settings, workspace, authToken, currentUser, flushState]);
 
   // Persist to localStorage
   useEffect(() => {
@@ -459,6 +539,14 @@ export default function App() {
       // Ignore storage errors
     }
   }, [sessions]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEYS.WORKSPACE, JSON.stringify(workspace));
+    } catch {
+      // Ignore storage errors
+    }
+  }, [workspace]);
 
   // Total duration for current phase
   const totalPhaseSeconds = useMemo(() => {
@@ -514,7 +602,17 @@ export default function App() {
       completedAt: getCurrentTimeLabel(),
       completedDate: getLocalIsoDate(0),
       cycleIndex: currentCycle,
+      startedAt: new Date(Date.now() - completedDuration * 60000).toISOString(),
+      ...(phase === TimerPhase.FOCUS
+        ? {
+            taskId: activeTask?.id ?? null,
+            category: activeTask?.category ?? null,
+            projectId: activeTask?.projectId ?? null,
+            interruptions: sessionInterruptionsRef.current,
+          }
+        : {}),
     };
+    if (phase === TimerPhase.FOCUS) sessionInterruptionsRef.current = 0;
 
     setSessions((prev) => [newSession, ...prev]);
 
@@ -751,6 +849,9 @@ export default function App() {
       } else if (e.key === 's' || e.key === 'S') {
         e.preventDefault();
         skipPhase();
+      } else if ((e.key === 'n' || e.key === 'N') && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault();
+        setIsBrainDumpOpen(true);
       }
     };
 
@@ -773,6 +874,7 @@ export default function App() {
       completedPomodoros: 0,
       completed: false,
       createdAt: getCurrentTimeLabel(),
+      projectId: newTaskProjectId || selectedProjectId || null,
     };
 
     setTasks((prev) => [created, ...prev]);
@@ -815,11 +917,159 @@ export default function App() {
     );
   };
 
+  const updateTask = (updated: PomodoroTask) => {
+    setTasks((prev) => prev.map((task) => (task.id === updated.id ? updated : task)));
+  };
+
+  const createTask = (fields: Partial<PomodoroTask> & { title: string }): PomodoroTask => ({
+    id: `task-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    category: 'Concentration',
+    estimatedPomodoros: 1,
+    completedPomodoros: 0,
+    completed: false,
+    createdAt: getCurrentTimeLabel(),
+    projectId: null,
+    ...fields,
+  });
+
+  const loadRoutine = (routine: RoutineTemplate) => {
+    const created = routine.tasks.map((t, index) =>
+      createTask({
+        id: `task-${Date.now()}-${index}`,
+        title: t.title,
+        category: t.category,
+        estimatedPomodoros: t.estimatedPomodoros,
+        projectId: t.projectId ?? null,
+        subtasks: (t.subtasks || []).map((title, i) => ({ id: `sub-${Date.now()}-${index}-${i}`, title, done: false })),
+      })
+    );
+    setTasks((prev) => [...created, ...prev]);
+    if (!activeTaskId && created[0]) setActiveTaskId(created[0].id);
+  };
+
+  const addBrainNote = (text: string) => {
+    setWorkspace((prev) => ({
+      ...prev,
+      notes: [{ id: `note-${Date.now()}`, text, createdAt: new Date().toISOString() }, ...prev.notes].slice(0, 300),
+    }));
+  };
+
+  // Raccourcis de l'application installée (manifest : /?action=focus, /?action=note)
+  useEffect(() => {
+    if (!authToken) return;
+    const params = new URLSearchParams(window.location.search);
+    const action = params.get('action');
+    if (!action) return;
+    if (action === 'note') setIsBrainDumpOpen(true);
+    if (action === 'focus') {
+      setActiveView(ActiveView.WORKSPACE);
+      setPhase(TimerPhase.FOCUS);
+      setIsRunning(true);
+    }
+    window.history.replaceState(null, '', window.location.pathname);
+  }, [authToken]);
+
+  // Pilotage vocal : actions demandées par l'assistant Gemini Live
+  const normalizeTitle = (value: string) =>
+    value.toLowerCase().normalize('NFD').replace(/\p{Diacritic}/gu, '').trim();
+  const findTaskByTitle = (title: string) => {
+    const wanted = normalizeTitle(title);
+    if (!wanted) return null;
+    const active = tasks.filter((t) => !t.completed);
+    return (
+      active.find((t) => normalizeTitle(t.title) === wanted) ||
+      active.find((t) => normalizeTitle(t.title).includes(wanted) || wanted.includes(normalizeTitle(t.title))) ||
+      null
+    );
+  };
+
+  const handleVoiceCommand = (name: string, args: Record<string, unknown>): Record<string, unknown> => {
+    const str = (v: unknown, max = 200) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
+    const num = (v: unknown, min: number, max: number) =>
+      typeof v === 'number' && Number.isFinite(v) ? Math.round(Math.max(min, Math.min(max, v))) : null;
+
+    switch (name) {
+      case 'start_focus': {
+        const minutes = num(args.minutes, 1, 180);
+        const title = str(args.task_title);
+        let task = title ? findTaskByTitle(title) : activeTask;
+        if (title && !task) {
+          task = createTask({ title });
+          setTasks((prev) => [task!, ...prev]);
+        }
+        if (task) setActiveTaskId(task.id);
+        switchPhase(TimerPhase.FOCUS, true);
+        const duration = minutes ?? settings.focusMinutes;
+        setSecondsLeft(duration * 60);
+        return {
+          ok: true,
+          minutes: duration,
+          task: task?.title ?? null,
+          summary: `Pomodoro de ${duration} min lancé${task ? ` — ${task.title}` : ''}`,
+        };
+      }
+      case 'pause_timer':
+        setIsRunning(false);
+        return { ok: true, summary: 'Minuteur en pause' };
+      case 'resume_timer':
+        setIsRunning(true);
+        return { ok: true, summary: 'Minuteur relancé' };
+      case 'skip_phase':
+        skipPhase();
+        return { ok: true, summary: 'Phase suivante' };
+      case 'reset_timer':
+        resetTimer();
+        return { ok: true, summary: 'Minuteur réinitialisé' };
+      case 'start_break': {
+        const long = args.kind === 'long';
+        switchPhase(long ? TimerPhase.LONG_BREAK : TimerPhase.SHORT_BREAK, true);
+        return { ok: true, summary: long ? 'Pause longue lancée' : 'Pause courte lancée' };
+      }
+      case 'add_task': {
+        const title = str(args.title);
+        if (!title) return { ok: false, error: 'titre manquant' };
+        const tomorrow = args.due === 'tomorrow';
+        const dueLabel = new Date(Date.now() + 86400000).toLocaleDateString('fr-FR', {
+          weekday: 'long',
+          day: 'numeric',
+          month: 'long',
+        });
+        const task = createTask({
+          title,
+          category: str(args.category, 40) || 'Concentration',
+          estimatedPomodoros: num(args.estimated_pomodoros, 1, 16) ?? 1,
+          notes: tomorrow ? `Prévue pour demain (${dueLabel})` : undefined,
+        });
+        setTasks((prev) => [task, ...prev]);
+        return { ok: true, summary: `Tâche ajoutée${tomorrow ? ' pour demain' : ''} — ${title}` };
+      }
+      case 'complete_task': {
+        const task = findTaskByTitle(str(args.title));
+        if (!task) return { ok: false, error: 'tâche introuvable' };
+        setTasks((prev) => prev.map((t) => (t.id === task.id ? { ...t, completed: true } : t)));
+        return { ok: true, summary: `Tâche terminée — ${task.title}` };
+      }
+      case 'get_status':
+        return {
+          ok: true,
+          phase: phaseConfig.shortLabel,
+          running: isRunning,
+          remaining_seconds: secondsLeft,
+          active_task: activeTask?.title ?? null,
+          pomodoros_today: metrics.focusCount,
+          daily_goal: settings.dailyGoal,
+        };
+      default:
+        return { ok: false, error: 'commande inconnue' };
+    }
+  };
+
   // Filtered tasks
   const filteredTasks = useMemo(() => {
     return tasks.filter((task) => {
       if (taskFilter === TaskFilter.ACTIVE && task.completed) return false;
       if (taskFilter === TaskFilter.COMPLETED && !task.completed) return false;
+      if (selectedProjectId && task.projectId !== selectedProjectId) return false;
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase();
         return (
@@ -828,7 +1078,7 @@ export default function App() {
       }
       return true;
     });
-  }, [tasks, taskFilter, searchQuery]);
+  }, [tasks, taskFilter, searchQuery, selectedProjectId]);
 
   // Filtered sessions
   const filteredSessions = useMemo(() => {
@@ -1005,6 +1255,7 @@ export default function App() {
 
     const handleVisibilityChange = () => {
       if (document.hidden) {
+        sessionInterruptionsRef.current += 1;
         setDistractionsIntercepted((prev) => prev + 1);
         const blockedSummary = blockedDomainsList.slice(0, 3).join(', ');
         setInterceptedSiteWarning(
@@ -1083,6 +1334,7 @@ export default function App() {
           const previous = lastBlockerAttemptsRef.current;
           if (previous !== null && info.attempts > previous && info.active) {
             setDistractionsIntercepted((prev) => prev + info.attempts - previous);
+            sessionInterruptionsRef.current += info.attempts - previous;
             setInterceptedSiteWarning(
               `Accès à ${info.lastAttempt?.domain || 'un site bloqué'} bloqué dans un autre onglet — il reste ${formatTime(secondsLeftRef.current)} de concentration.`
             );
@@ -1175,14 +1427,98 @@ export default function App() {
     }
   };
 
+  const rootClassName = darkMode
+    ? 'dark min-h-screen bg-[#0B0F17] text-slate-100 transition-colors duration-150 flex flex-col'
+    : 'min-h-screen bg-[#FAFAFA] text-slate-900 transition-colors duration-150 flex flex-col';
+
+  // Compte & synchronisation (connexion depuis l'accueil, gestion du compte une fois connecté)
+  const authModal = (
+    <MongoAuthModal
+      isOpen={isAuthModalOpen}
+      initialMode={authModalMode}
+      onClose={() => setIsAuthModalOpen(false)}
+      currentUser={currentUser}
+      dbStatus={dbStatus}
+      lastSyncedAt={lastSyncedAt}
+      currentTasks={tasks}
+      currentSessions={sessions}
+      currentSettings={settings}
+      currentWorkspace={workspace}
+      syncStatus={syncStatus}
+      isLiveConnected={isLiveConnected}
+      onAuthSuccess={(token, user, state) => {
+        try {
+          localStorage.setItem(STORAGE_KEYS.AUTH_TOKEN, token);
+        } catch {
+          // Ignore
+        }
+        applyRemoteState(state);
+        setCurrentUser(user);
+        setSyncStatus('saved');
+        setAuthToken(token);
+      }}
+      onLogout={() => {
+        const token = authTokenRef.current;
+        if (token) {
+          // Lève le bouclier de ce compte puis révoque la session
+          fetch('/api/blocker/state', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+            body: JSON.stringify({ active: false, domains: [] }),
+          })
+            .catch(() => {})
+            .finally(() =>
+              fetch('/api/auth/logout', {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${token}` },
+              }).catch(() => {})
+            );
+        }
+        clearSession();
+        // Rien ne doit rester visible pour la personne suivante sur ce navigateur
+        setIsRunning(false);
+        setTasks([]);
+        setSessions([]);
+        setSettings(DEFAULT_SETTINGS);
+        setWorkspace(EMPTY_WORKSPACE);
+        setActiveTaskId(null);
+        setDistractionsIntercepted(0);
+        hasPublishedBlockerRef.current = false;
+        try {
+          localStorage.removeItem(STORAGE_KEYS.TASKS);
+          localStorage.removeItem(STORAGE_KEYS.SESSIONS);
+          localStorage.removeItem(STORAGE_KEYS.SETTINGS);
+          localStorage.removeItem(STORAGE_KEYS.WORKSPACE);
+        } catch {
+          // Ignore
+        }
+      }}
+    />
+  );
+
+  // Visiteur non connecté : page d'accueil qui présente Kronova avant la connexion
+  if (!authToken) {
+    return (
+      <div className={rootClassName}>
+        <LandingPage
+          darkMode={darkMode}
+          onToggleDarkMode={() => setDarkMode((prev) => !prev)}
+          onLogin={() => {
+            setAuthModalMode('login');
+            setIsAuthModalOpen(true);
+          }}
+          onRegister={() => {
+            setAuthModalMode('register');
+            setIsAuthModalOpen(true);
+          }}
+        />
+        {authModal}
+      </div>
+    );
+  }
+
   return (
-    <div
-      className={
-        darkMode
-          ? 'dark min-h-screen bg-[#0B0F17] text-slate-100 transition-colors duration-150 flex flex-col'
-          : 'min-h-screen bg-[#FAFAFA] text-slate-900 transition-colors duration-150 flex flex-col'
-      }
-    >
+    <div className={rootClassName}>
       {/* Top Bar Contract: Hidden when Mode Concentration Maximale is active and timer is running */}
       {!isMaxFocusActive && (
         <header className="sticky top-0 z-30 border-b border-neutral-200/80 dark:border-slate-800/80 bg-[#FAFAFA]/90 dark:bg-[#0B0F17]/90 backdrop-blur-md">
@@ -1683,7 +2019,7 @@ export default function App() {
                   <div className="w-full mt-4 pt-3 border-t border-neutral-100 dark:border-slate-800/60 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400 dark:text-slate-500">
                     <span>{phaseConfig.description}</span>
                     <span className="font-mono-tabular hidden sm:inline">
-                      Espace : Démarrer/Pause · R : Réinitialiser · S : Passer
+                      Espace : Démarrer/Pause · R : Réinitialiser · S : Passer · N : Note rapide
                     </span>
                   </div>
                 </>
@@ -1721,6 +2057,17 @@ export default function App() {
                     youtubeVolume: vol,
                   }))
                 }
+              />
+
+              <AmbientMixer
+                enabled={Boolean(settings.ambientMixEnabled)}
+                shouldPlay={isRunning && phase === TimerPhase.FOCUS}
+                mix={settings.ambientMix || DEFAULT_SETTINGS.ambientMix}
+                onMixChange={(mix) => setSettings((prev) => ({ ...prev, ambientMix: mix }))}
+                onToggleEnabled={() =>
+                  setSettings((prev) => ({ ...prev, ambientMixEnabled: !prev.ambientMixEnabled }))
+                }
+                isMaxFocusActive={isMaxFocusActive}
               />
 
               {/* Inspirational Productivity Quote Section (Updated on each new Focus session) */}
@@ -1904,12 +2251,47 @@ export default function App() {
             {/* Right Column (5 cols): Task Queue & Session Metrics (Hidden in Mode Concentration Maximale) */}
             {!isMaxFocusActive && (
               <aside className="lg:col-span-5 flex flex-col gap-6">
+              <DailyGoalCard
+                sessions={sessions}
+                dailyGoal={settings.dailyGoal ?? DEFAULT_SETTINGS.dailyGoal}
+                onChangeGoal={(goal) => setSettings((prev) => ({ ...prev, dailyGoal: goal }))}
+              />
+
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  onClick={() => (pip.pipWindow ? pip.close() : pip.open())}
+                  disabled={!pip.supported}
+                  title={
+                    pip.supported
+                      ? 'Garder le minuteur visible au-dessus de vos autres applications'
+                      : 'Disponible sur Chrome et Edge (version 116 ou plus récente)'
+                  }
+                  className="min-h-11 px-3 py-2 rounded-xl border border-neutral-200 dark:border-slate-800 bg-white dark:bg-[#111827] text-xs font-medium text-slate-700 dark:text-slate-300 hover:bg-neutral-50 dark:hover:bg-slate-800 disabled:opacity-40 flex items-center justify-center gap-2 cursor-pointer disabled:cursor-not-allowed"
+                >
+                  <PictureInPicture2 className="w-4 h-4" />
+                  <span>{pip.pipWindow ? 'Fermer le mini-minuteur' : 'Mini-minuteur flottant'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsBrainDumpOpen(true)}
+                  className="min-h-11 px-3 py-2 rounded-xl border border-neutral-200 dark:border-slate-800 bg-white dark:bg-[#111827] text-xs font-medium text-slate-700 dark:text-slate-300 hover:bg-neutral-50 dark:hover:bg-slate-800 flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  <NotebookPen className="w-4 h-4" />
+                  <span>Vide-Esprit</span>
+                  {workspace.notes.length > 0 && (
+                    <span className="font-mono-tabular text-slate-400">{workspace.notes.length}</span>
+                  )}
+                </button>
+              </div>
+
               {/* Real-Time Gemini 3.8 Live Voice Coach */}
               <LiveVoiceCoach
                 currentTaskTitle={activeTask ? activeTask.title : null}
                 currentPhaseLabel={phaseConfig.shortLabel}
                 isMaxFocusActive={isMaxFocusActive}
                 authToken={authToken}
+                onVoiceCommand={handleVoiceCommand}
               />
 
               {/* Compact Quantitative Summary Strip (Single-Elevation Surface) */}
@@ -2200,6 +2582,49 @@ export default function App() {
               </div>
             </div>
 
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+              <div className="lg:col-span-7">
+                <DayPlanner
+                  tasks={tasks}
+                  projects={workspace.projects}
+                  dayPlan={workspace.dayPlan}
+                  settings={settings}
+                  activeTaskId={activeTaskId}
+                  onReorder={(ids) => setWorkspace((prev) => ({ ...prev, dayPlan: ids }))}
+                  onFocusTask={(id) => {
+                    setActiveTaskId(id);
+                    setActiveView(ActiveView.WORKSPACE);
+                  }}
+                />
+              </div>
+              <div className="lg:col-span-5 flex flex-col gap-6">
+                <ProjectManager
+                  projects={workspace.projects}
+                  tasks={tasks}
+                  selectedProjectId={selectedProjectId}
+                  onSelect={setSelectedProjectId}
+                  onChange={(projects) => {
+                    setWorkspace((prev) => ({ ...prev, projects }));
+                    const ids = new Set(projects.map((p) => p.id));
+                    setTasks((prev) =>
+                      prev.map((t) => (t.projectId && !ids.has(t.projectId) ? { ...t, projectId: null } : t))
+                    );
+                  }}
+                />
+                <RoutinesPanel
+                  routines={workspace.routines}
+                  activeTasks={tasks.filter((t) => !t.completed)}
+                  onSave={(routine) =>
+                    setWorkspace((prev) => ({ ...prev, routines: [...prev.routines, routine] }))
+                  }
+                  onLoad={loadRoutine}
+                  onDelete={(id) =>
+                    setWorkspace((prev) => ({ ...prev, routines: prev.routines.filter((r) => r.id !== id) }))
+                  }
+                />
+              </div>
+            </div>
+
             {/* New Task Bar */}
             <form
               onSubmit={handleAddTask}
@@ -2219,6 +2644,21 @@ export default function App() {
                 placeholder="Domaine (ex: Conception)"
                 className="sm:w-44 min-h-[42px] px-3.5 py-2 text-sm bg-neutral-50 dark:bg-slate-900 border border-neutral-200 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white placeholder:text-slate-400 focus:outline-none focus:border-slate-900 dark:focus:border-slate-400"
               />
+              {workspace.projects.length > 0 && (
+                <select
+                  value={newTaskProjectId || selectedProjectId || ''}
+                  onChange={(e) => setNewTaskProjectId(e.target.value)}
+                  aria-label="Projet de la nouvelle tâche"
+                  className="sm:w-40 min-h-[42px] px-3 py-2 text-sm bg-neutral-50 dark:bg-slate-900 border border-neutral-200 dark:border-slate-800 rounded-xl text-slate-900 dark:text-white focus:outline-none cursor-pointer"
+                >
+                  <option value="">Sans projet</option>
+                  {workspace.projects.map((project) => (
+                    <option key={project.id} value={project.id}>
+                      {project.name}
+                    </option>
+                  ))}
+                </select>
+              )}
               <div className="flex items-center gap-2 px-3 min-h-[42px] bg-neutral-50 dark:bg-slate-900 border border-neutral-200 dark:border-slate-800 rounded-xl">
                 <span className="text-xs text-slate-500 dark:text-slate-400">Cycles :</span>
                 <input
@@ -2265,9 +2705,15 @@ export default function App() {
                     <tbody className="divide-y divide-neutral-200/70 dark:divide-slate-800 text-sm">
                       {filteredTasks.map((task) => {
                         const isTarget = task.id === activeTaskId;
+                        const project = task.projectId
+                          ? workspace.projects.find((p) => p.id === task.projectId)
+                          : null;
+                        const isExpanded = expandedTaskId === task.id;
+                        const stepCount = task.subtasks?.length || 0;
+                        const stepDone = task.subtasks?.filter((st) => st.done).length || 0;
                         return (
+                          <React.Fragment key={task.id}>
                           <tr
-                            key={task.id}
                             className="hover:bg-neutral-50/80 dark:hover:bg-slate-800/40 transition-colors"
                           >
                             <td className="py-3.5 pl-6 pr-3">
@@ -2284,9 +2730,26 @@ export default function App() {
                               </button>
                             </td>
                             <td className="py-3.5 px-3 font-medium text-slate-900 dark:text-white">
-                              <span className={task.completed ? 'line-through text-slate-400' : ''}>
-                                {task.title}
-                              </span>
+                              <button
+                                type="button"
+                                onClick={() => setExpandedTaskId(isExpanded ? null : task.id)}
+                                aria-expanded={isExpanded}
+                                className="flex items-center gap-2 text-left cursor-pointer"
+                              >
+                                <ChevronRight
+                                  className={`w-3.5 h-3.5 shrink-0 text-slate-400 transition-transform ${isExpanded ? 'rotate-90' : ''}`}
+                                />
+                                <ProjectDot project={project} />
+                                <span className={task.completed ? 'line-through text-slate-400' : ''}>
+                                  {task.title}
+                                </span>
+                                {stepCount > 0 && (
+                                  <span className="font-mono-tabular text-xs font-normal text-slate-400">
+                                    {stepDone}/{stepCount}
+                                  </span>
+                                )}
+                                {task.notes && <StickyNote className="w-3 h-3 text-slate-400" aria-label="Notes" />}
+                              </button>
                             </td>
                             <td className="py-3.5 px-3 text-xs text-slate-500 dark:text-slate-400">
                               <span>{task.category}</span>
@@ -2341,6 +2804,19 @@ export default function App() {
                               </div>
                             </td>
                           </tr>
+                          {isExpanded && (
+                            <tr>
+                              <td colSpan={5} className="p-0">
+                                <TaskDetailPanel
+                                  task={task}
+                                  projects={workspace.projects}
+                                  focusMinutes={settings.focusMinutes}
+                                  onChange={updateTask}
+                                />
+                              </td>
+                            </tr>
+                          )}
+                          </React.Fragment>
                         );
                       })}
                     </tbody>
@@ -2410,8 +2886,53 @@ export default function App() {
                   <Download className="w-3.5 h-3.5" />
                   <span>Exporter CSV</span>
                 </button>
+                {(['week', 'month'] as const).map((period) => (
+                  <button
+                    key={period}
+                    type="button"
+                    onClick={() => {
+                      const opened = openFocusReport({
+                        period,
+                        sessions,
+                        tasks,
+                        projects: workspace.projects,
+                        userName: currentUser?.name || 'Kronova',
+                        dailyGoal: settings.dailyGoal ?? DEFAULT_SETTINGS.dailyGoal,
+                      });
+                      if (!opened) {
+                        setInterceptedSiteWarning('Autorisez les fenêtres pop-up pour afficher le bilan PDF.');
+                      }
+                    }}
+                    disabled={sessions.length === 0}
+                    className="min-h-[38px] px-3.5 py-2 rounded-xl border border-neutral-200 dark:border-slate-800 bg-white dark:bg-[#111827] text-xs font-medium text-slate-700 dark:text-slate-300 hover:bg-neutral-50 dark:hover:bg-slate-800 disabled:opacity-40 transition-colors flex items-center gap-2 whitespace-nowrap cursor-pointer"
+                  >
+                    <FileText className="w-3.5 h-3.5" />
+                    <span>{period === 'week' ? 'Bilan PDF semaine' : 'Bilan PDF mois'}</span>
+                  </button>
+                ))}
               </div>
             </div>
+
+            <FocusInsights sessions={sessions} />
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              <FocusHeatmap sessions={sessions} />
+              <ProjectBreakdownChart sessions={sessions} tasks={tasks} projects={workspace.projects} />
+            </div>
+
+            <GoogleSyncPanel
+              clientId={googleClientId}
+              sessions={sessions}
+              existingTaskTitles={tasks.map((t) => t.title)}
+              onImportTasks={(imported) =>
+                setTasks((prev) => [
+                  ...imported.map((t, index) =>
+                    createTask({ id: `task-${Date.now()}-g${index}`, title: t.title, notes: t.notes })
+                  ),
+                  ...prev,
+                ])
+              }
+            />
 
             {/* Weekly Focus Time Chart (Recharts) */}
             <div className="bg-white dark:bg-[#111827] border border-neutral-200 dark:border-slate-800 rounded-2xl p-6">
@@ -2606,6 +3127,24 @@ export default function App() {
         {/* Dedicated Settings View */}
         {activeView === ActiveView.SETTINGS && (
           <section aria-label="Paramètres du minuteur Pomodoro" className="max-w-3xl mx-auto space-y-8">
+            {installPrompt.canInstall && (
+              <div className="bg-white dark:bg-[#111827] border border-neutral-200 dark:border-slate-800 rounded-2xl p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div>
+                  <div className="text-sm font-semibold text-slate-900 dark:text-white">Installer Kronova</div>
+                  <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                    Une application sur votre bureau ou votre téléphone, avec sa propre icône, utilisable hors-ligne.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => installPrompt.install()}
+                  className="min-h-10 px-4 py-2 rounded-xl bg-slate-900 dark:bg-white text-white dark:text-slate-900 text-xs font-medium flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  <MonitorDown className="w-4 h-4" />
+                  <span>Installer l’application</span>
+                </button>
+              </div>
+            )}
             <div className="border-b border-neutral-200 dark:border-slate-800 pb-6">
               <h1 className="text-2xl font-semibold tracking-tight text-slate-900 dark:text-white">
                 Réglages de la cadence
@@ -3251,65 +3790,35 @@ export default function App() {
         )}
       </main>
 
-      {/* MongoDB Authentication & Sync Modal */}
-      <MongoAuthModal
-        isOpen={isAuthModalOpen || !authToken}
-        mandatory={!authToken}
-        onClose={() => setIsAuthModalOpen(false)}
-        currentUser={currentUser}
-        dbStatus={dbStatus}
-        lastSyncedAt={lastSyncedAt}
-        currentTasks={tasks}
-        currentSessions={sessions}
-        currentSettings={settings}
-        syncStatus={syncStatus}
-        isLiveConnected={isLiveConnected}
-        onAuthSuccess={(token, user, state) => {
-          try {
-            localStorage.setItem(STORAGE_KEYS.AUTH_TOKEN, token);
-          } catch {
-            // Ignore
-          }
-          applyRemoteState(state);
-          setCurrentUser(user);
-          setSyncStatus('saved');
-          setAuthToken(token);
-        }}
-        onLogout={() => {
-          const token = authTokenRef.current;
-          if (token) {
-            // Lève le bouclier de ce compte puis révoque la session
-            fetch('/api/blocker/state', {
-              method: 'PUT',
-              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-              body: JSON.stringify({ active: false, domains: [] }),
-            })
-              .catch(() => {})
-              .finally(() =>
-                fetch('/api/auth/logout', {
-                  method: 'POST',
-                  headers: { Authorization: `Bearer ${token}` },
-                }).catch(() => {})
-              );
-          }
-          clearSession();
-          // Rien ne doit rester visible pour la personne suivante sur ce navigateur
-          setIsRunning(false);
-          setTasks([]);
-          setSessions([]);
-          setSettings(DEFAULT_SETTINGS);
-          setActiveTaskId(null);
-          setDistractionsIntercepted(0);
-          hasPublishedBlockerRef.current = false;
-          try {
-            localStorage.removeItem(STORAGE_KEYS.TASKS);
-            localStorage.removeItem(STORAGE_KEYS.SESSIONS);
-            localStorage.removeItem(STORAGE_KEYS.SETTINGS);
-          } catch {
-            // Ignore
-          }
+      <BrainDumpModal
+        isOpen={isBrainDumpOpen}
+        notes={workspace.notes}
+        onClose={() => setIsBrainDumpOpen(false)}
+        onAdd={addBrainNote}
+        onDelete={(id) =>
+          setWorkspace((prev) => ({ ...prev, notes: prev.notes.filter((n) => n.id !== id) }))
+        }
+        onConvertToTask={(note) => {
+          setTasks((prev) => [createTask({ title: note.text.split('\n')[0].slice(0, 120), notes: note.text }), ...prev]);
+          setWorkspace((prev) => ({ ...prev, notes: prev.notes.filter((n) => n.id !== note.id) }));
         }}
       />
+
+      {pip.pipWindow && (
+        <PipTimer
+          pipWindow={pip.pipWindow}
+          darkMode={darkMode}
+          timeLabel={formatTime(secondsLeft)}
+          phaseLabel={phaseConfig.shortLabel}
+          taskTitle={activeTask ? activeTask.title : null}
+          progress={totalPhaseSeconds ? 1 - secondsLeft / totalPhaseSeconds : 0}
+          isRunning={isRunning}
+          onToggle={toggleTimer}
+          onSkip={skipPhase}
+        />
+      )}
+
+      {authModal}
     </div>
   );
 }

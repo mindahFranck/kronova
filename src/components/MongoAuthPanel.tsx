@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Database, LogOut, User, X, Check } from 'lucide-react';
-import { PomodoroTask, SessionRecord, TimerSettings } from '../types';
+import { PomodoroTask, SessionRecord, TimerSettings, Workspace } from '../types';
 
 export interface AuthenticatedUser {
   userId: string;
@@ -21,8 +21,8 @@ export type SyncStatus = 'idle' | 'saving' | 'saved' | 'offline';
 
 interface MongoAuthModalProps {
   isOpen: boolean;
-  /** Écran d'accueil obligatoire (aucun utilisateur connecté) : pas de fermeture possible */
-  mandatory?: boolean;
+  /** Onglet affiché à l'ouverture (connexion ou création de compte) */
+  initialMode?: 'login' | 'register';
   onClose: () => void;
   currentUser: AuthenticatedUser | null;
   dbStatus: DbStatusInfo | null;
@@ -30,6 +30,7 @@ interface MongoAuthModalProps {
   currentTasks: PomodoroTask[];
   currentSessions: SessionRecord[];
   currentSettings: TimerSettings;
+  currentWorkspace: Workspace;
   syncStatus: SyncStatus;
   isLiveConnected: boolean;
   onAuthSuccess: (
@@ -39,6 +40,7 @@ interface MongoAuthModalProps {
       tasks: PomodoroTask[];
       sessions: SessionRecord[];
       settings: Partial<TimerSettings>;
+      workspace?: Partial<Workspace>;
     }
   ) => void;
   onLogout: () => void;
@@ -46,7 +48,7 @@ interface MongoAuthModalProps {
 
 export const MongoAuthModal: React.FC<MongoAuthModalProps> = ({
   isOpen,
-  mandatory = false,
+  initialMode = 'login',
   onClose,
   currentUser,
   dbStatus,
@@ -54,18 +56,26 @@ export const MongoAuthModal: React.FC<MongoAuthModalProps> = ({
   currentTasks,
   currentSessions,
   currentSettings,
+  currentWorkspace,
   syncStatus,
   isLiveConnected,
   onAuthSuccess,
   onLogout,
 }) => {
-  const [mode, setMode] = useState<'login' | 'register'>('login');
+  const [mode, setMode] = useState<'login' | 'register'>(initialMode);
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [inviteCode, setInviteCode] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (isOpen) {
+      setMode(initialMode);
+      setError(null);
+    }
+  }, [isOpen, initialMode]);
 
   if (!isOpen) return null;
 
@@ -87,6 +97,7 @@ export const MongoAuthModal: React.FC<MongoAuthModalProps> = ({
                 tasks: currentTasks,
                 sessions: currentSessions,
                 settings: currentSettings,
+                workspace: currentWorkspace,
               },
             }
           : { email, password };
@@ -118,18 +129,8 @@ export const MongoAuthModal: React.FC<MongoAuthModalProps> = ({
       role="dialog"
       aria-modal="true"
       aria-labelledby="mongo-auth-title"
-      className={`fixed inset-0 z-50 flex items-center justify-center p-4 ${
-        mandatory ? 'bg-[#FAFAFA] dark:bg-[#0B0F17] flex-col gap-6' : 'bg-black/50 backdrop-blur-xs'
-      }`}
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-xs"
     >
-      {mandatory && (
-        <div className="text-center">
-          <div className="font-display text-4xl tracking-tight text-slate-900 dark:text-white">Kronova</div>
-          <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
-            Le temps, un nouvel élan — votre espace de concentration personnel.
-          </p>
-        </div>
-      )}
       <div className="w-full max-w-md bg-white dark:bg-[#111827] border border-neutral-200 dark:border-slate-800 rounded-2xl p-6 shadow-xl">
         <div className="flex items-center justify-between border-b border-neutral-200 dark:border-slate-800 pb-4 mb-5">
           <div className="flex items-center gap-2.5">
@@ -138,32 +139,21 @@ export const MongoAuthModal: React.FC<MongoAuthModalProps> = ({
               id="mongo-auth-title"
               className="text-base font-semibold text-slate-900 dark:text-white"
             >
-              {mandatory ? 'Connexion à votre espace' : 'Compte & synchronisation'}
+              {currentUser
+                ? 'Mon compte'
+                : mode === 'register'
+                ? 'Créer mon espace Kronova'
+                : 'Connexion à Kronova'}
             </h2>
           </div>
-          {!mandatory && (
-            <button
-              type="button"
-              onClick={onClose}
-              aria-label="Fermer la fenêtre"
-              className="p-1 text-slate-400 hover:text-slate-900 dark:hover:text-white rounded-lg cursor-pointer"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          )}
-        </div>
-
-        {/* MongoDB Engine Status */}
-        <div className="mb-5 pb-4 border-b border-neutral-100 dark:border-slate-800/70 text-xs text-slate-500 dark:text-slate-400 space-y-1">
-          <div className="flex items-center justify-between">
-            <span>Moteur de persistance :</span>
-            <span className="font-mono-tabular font-medium text-slate-900 dark:text-white">
-              {dbStatus ? dbStatus.engine : 'MongoDB'}
-            </span>
-          </div>
-          <p className="text-[11px] text-slate-400 dark:text-slate-500">
-            {dbStatus?.message}
-          </p>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Fermer la fenêtre"
+            className="p-1 text-slate-400 hover:text-slate-900 dark:hover:text-white rounded-lg cursor-pointer"
+          >
+            <X className="w-4 h-4" />
+          </button>
         </div>
 
         {currentUser ? (

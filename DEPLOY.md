@@ -46,6 +46,7 @@ Settings → Secrets and variables → Actions :
 | `GEMINI_API_KEY`        | clé Gemini (régénérée)                                        |
 | `SIGNUP_CODE`           | code d'invitation à donner aux collègues (recommandé)         |
 | `ALLOWED_EMAIL_DOMAINS` | optionnel, ex. `kamer-center.net`                             |
+| `GOOGLE_CLIENT_ID`      | optionnel — ID client OAuth pour Google Agenda / Tasks (voir §5) |
 
 Sans `SIGNUP_CODE` ni `ALLOWED_EMAIL_DOMAINS`, n'importe qui peut créer un compte sur le site
 public.
@@ -71,3 +72,12 @@ Bouclier. Elle se lie toute seule au compte connecté sur kro-nova.com : aucune 
 | **Installation forcée par stratégie (Google Workspace / GPO)** | postes gérés | publier sur le Web Store, puis l'imposer depuis la console d'administration ; les utilisateurs ne peuvent pas la désactiver |
 
 Recommandé : Chrome Web Store en « Non répertoriée », puis partage du lien de la fiche.
+
+## 5. Google Agenda / Google Tasks (optionnel)
+
+1. Google Cloud Console → créer un ID client OAuth de type « Application Web ».
+2. Origines JavaScript autorisées : `https://kro-nova.com` et `http://localhost:3000`.
+3. Activer **Google Calendar API** et **Google Tasks API**.
+4. Écran de consentement : scopes `calendar.events` et `tasks.readonly` ; ajouter les collègues
+   comme utilisateurs de test tant que l'application n'est pas validée par Google.
+5. Renseigner le secret `GOOGLE_CLIENT_ID`. Sans lui, le panneau du Journal explique la configuration.
