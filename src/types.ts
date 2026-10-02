@@ -17,6 +17,12 @@ export enum ActiveView {
   SETTINGS = 'SETTINGS',
 }
 
+export interface Subtask {
+  id: string;
+  title: string;
+  done: boolean;
+}
+
 export interface PomodoroTask {
   id: string;
   title: string;
@@ -25,6 +31,58 @@ export interface PomodoroTask {
   completedPomodoros: number;
   completed: boolean;
   createdAt: string;
+  /** Étapes cochables */
+  subtasks?: Subtask[];
+  /** Notes libres sur la tâche */
+  notes?: string;
+  /** Projet / tag (Workspace.projects) */
+  projectId?: string | null;
+}
+
+/** Projet ou tag avec code couleur sobre */
+export interface Project {
+  id: string;
+  name: string;
+  /** Couleur hexadécimale, ex. #6366f1 */
+  color: string;
+}
+
+/** Note rapide « Vide-Esprit » */
+export interface BrainNote {
+  id: string;
+  text: string;
+  /** ISO 8601 */
+  createdAt: string;
+}
+
+/** Modèle de routine récurrente (ex. Routine du matin) */
+export interface RoutineTemplate {
+  id: string;
+  name: string;
+  tasks: Array<{
+    title: string;
+    category: string;
+    estimatedPomodoros: number;
+    projectId?: string | null;
+    subtasks?: string[];
+  }>;
+}
+
+/** Données d'organisation personnelles, synchronisées avec le compte */
+export interface Workspace {
+  projects: Project[];
+  routines: RoutineTemplate[];
+  notes: BrainNote[];
+  /** Ordre du planning de la journée (ids de tâches) */
+  dayPlan: string[];
+}
+
+/** Volumes 0–100 des générateurs d'ambiance intégrés */
+export interface AmbientMix {
+  rain: number;
+  brown: number;
+  fire: number;
+  cafe: number;
 }
 
 export interface SessionRecord {
@@ -35,6 +93,13 @@ export interface SessionRecord {
   completedAt: string;
   completedDate?: string;
   cycleIndex: number;
+  taskId?: string | null;
+  category?: string | null;
+  projectId?: string | null;
+  /** Sorties d'onglet / sites bloqués pendant la session */
+  interruptions?: number;
+  /** Début de la session, ISO 8601 */
+  startedAt?: string;
 }
 
 export interface TimerSettings {
@@ -58,4 +123,8 @@ export interface TimerSettings {
   blockedDomains: string[];
   strictTabGuardEnabled: boolean;
   autoFullscreenOnFocus: boolean;
+  /** Objectif quotidien en Pomodoros */
+  dailyGoal: number;
+  ambientMixEnabled: boolean;
+  ambientMix: AmbientMix;
 }

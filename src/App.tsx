@@ -104,6 +104,9 @@ const DEFAULT_SETTINGS: TimerSettings = {
   blockedDomains: DEFAULT_BLOCKED_DOMAINS,
   strictTabGuardEnabled: true,
   autoFullscreenOnFocus: false,
+  dailyGoal: 6,
+  ambientMixEnabled: false,
+  ambientMix: { rain: 0, brown: 0, fire: 0, cafe: 0 },
 };
 
 // Anciennes données de démonstration (ids fixes) : purgées du stockage local et de la base.
