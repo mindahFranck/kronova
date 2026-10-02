@@ -210,7 +210,7 @@ export default function App() {
   const [darkMode, setDarkMode] = useState<boolean>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEYS.THEME);
-      return saved ? JSON.parse(saved) : false;
+      return saved ? JSON.parse(saved) : window.matchMedia('(prefers-color-scheme: dark)').matches;
     } catch {
       return false;
     }

@@ -1,5 +1,8 @@
 @import "tailwindcss";
 
+/* Le thème sombre suit le bouton de l'app (classe .dark), pas seulement le réglage du système */
+@custom-variant dark (&:where(.dark, .dark *));
+
 @layer base {
   :root {
     --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
