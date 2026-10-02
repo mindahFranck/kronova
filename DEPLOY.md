@@ -1,12 +1,13 @@
 # Déployer Kronova sur kro-nova.com
 
-Même pipeline que Meet 237 : GitHub Actions construit l'image Docker, la pousse sur
+Même pipeline qu'Akademika : GitHub Actions construit l'image Docker, la pousse sur
 Docker Hub, puis la lance par SSH sur le serveur derrière `nginx-proxy` (réseau `proxy-tier`).
 
 ## 1. Prérequis (une seule fois)
 
-**Serveur.** Le serveur de Meet 237 convient : `nginx-proxy` y tourne déjà sur le réseau
-`proxy-tier`. Kronova y ajoute un seul conteneur, `kronova-app`.
+**Serveur.** `78.142.242.49`, partagé avec MboaPass et Akademika : `nginx-proxy` y tourne déjà sur
+le réseau `proxy-tier`. Kronova y ajoute un seul conteneur, `kronova-app`, et le dossier
+`/var/kronova/data` ; tous ses noms portent le préfixe `kronova`.
 
 **DNS (chez Amen).** Le domaine pointe aujourd'hui vers la page de parking Amen (81.88.57.68).
 Dans la zone DNS de kro-nova.com :
@@ -14,7 +15,7 @@ Dans la zone DNS de kro-nova.com :
 | Type | Nom   | Valeur              |
 |------|-------|---------------------|
 | A    | `@`   | IP du serveur       |
-| A    | `www` | IP du serveur       |
+| CNAME | `www` | `kro-nova.com.`    |
 
 Supprimer les anciens enregistrements A/CNAME de `@` et `www`. Alternative : déléguer le
 domaine à Cloudflare comme meet237online.com, pour avoir la même gestion des certificats.
@@ -32,21 +33,23 @@ domaine à Cloudflare comme meet237online.com, pour avoir la même gestion des c
 Créer le dépôt, pousser le code sur `main`, puis renseigner les secrets dans
 Settings → Secrets and variables → Actions :
 
+Mêmes noms de secrets que les autres projets du serveur (Akademika, MboaPass) :
+
 | Secret                  | Valeur                                                        |
 |-------------------------|---------------------------------------------------------------|
-| `DOCKER_USERNAME`       | compte Docker Hub (le même que Meet 237)                      |
-| `DOCKER_PASSWORD`       | jeton d'accès Docker Hub                                      |
-| `SSH_HOST`              | IP du serveur                                                 |
-| `SERVER_USER`           | utilisateur SSH                                               |
-| `SSH_KEY`               | clé privée SSH (ou `SSH_PASSWORD`)                            |
+| `DOCKER_USERNAME`       | `nkemeni` (compte Docker Hub de l'image `nkemeni/kronova`)    |
+| `DOCKER_PASSWORD`       | jeton d'accès Docker Hub (Read & Write)                       |
+| `SSH_HOST`              | `78.142.242.49`                                               |
+| `SSH_USER`              | utilisateur SSH (root, ou sudo sans mot de passe)             |
+| `SSH_PASSWORD`          | mot de passe SSH                                              |
 | `SSH_PORT`              | optionnel, 22 par défaut                                      |
-| `ADMIN_EMAIL`           | e-mail de contact Let's Encrypt                               |
+| `LETSENCRYPT_EMAIL`     | e-mail de contact Let's Encrypt                               |
 | `MONGODB_URI`           | `mongodb+srv://…` (nouveau mot de passe Atlas)                |
-| `MONGODB_DB`            | optionnel, `kronova` par défaut                               |
 | `GEMINI_API_KEY`        | clé Gemini (régénérée)                                        |
 | `SIGNUP_CODE`           | code d'invitation à donner aux collègues (recommandé)         |
-| `ALLOWED_EMAIL_DOMAINS` | optionnel, ex. `kamer-center.net`                             |
-| `GOOGLE_CLIENT_ID`      | optionnel — ID client OAuth pour Google Agenda / Tasks (voir §5) |
+| `MONGODB_DB`            | optionnel (secret ou variable), `kronova` par défaut          |
+| `ALLOWED_EMAIL_DOMAINS` | optionnel (secret ou variable), ex. `kaeyros-analytics.com`   |
+| `GOOGLE_CLIENT_ID`      | optionnel (secret ou variable) — Google Agenda / Tasks (§5)   |
 
 Sans `SIGNUP_CODE` ni `ALLOWED_EMAIL_DOMAINS`, n'importe qui peut créer un compte sur le site
 public.

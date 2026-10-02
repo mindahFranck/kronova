@@ -1,21 +1,57 @@
-name: Deploy Kronova
+name: Deploiement Kronova
 
+# Le deploiement ne part que de la branche principale, ou a la demande.
 on:
   push:
     branches: [main]
   workflow_dispatch:
 
+# Un seul deploiement a la fois : deux executions concurrentes pourraient
+# remettre en ligne une image plus ancienne que celle deja deployee.
+concurrency:
+  group: production-kronova
+  cancel-in-progress: false
+
 env:
-  APP_IMAGE: ${{ secrets.DOCKER_USERNAME }}/kronova
-  # Domaine de production — modifier ici pour changer de cible.
-  APP_DOMAIN: kro-nova.com
-  WWW_DOMAIN: www.kro-nova.com
+  # Nom de l'image ecrit ici et non tire d'un secret : ce n'est pas une donnee
+  # confidentielle (meme compte Docker Hub qu'Akademika).
+  APP_IMAGE: nkemeni/kronova
+  WEB_HOST: kro-nova.com
+
+  # Ce serveur heberge aussi MboaPass et Akademika. Tous les noms propres a
+  # Kronova portent le prefixe `kronova` pour ne jamais remplacer leurs
+  # ressources. Le reseau `proxy-tier` et nginx-proxy sont, eux, communs.
+  APP_CONTAINER: kronova-app
+  DATA_DIR: /var/kronova/data
 
 jobs:
-
-  build:
-    name: Build & push image
+  # ---------------------------------------------------------------------------
+  # Rien ne part sans que la verification soit passee.
+  # ---------------------------------------------------------------------------
+  verifier:
+    name: Verification
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Typage
+        run: npm run lint
+      - name: Construction (site + extension)
+        run: npm run build
+      - name: Extension empaquetee
+        run: unzip -l dist/downloads/kronova-extension.zip | grep -q manifest.json
+
+  # ---------------------------------------------------------------------------
+  # Construction de l'image
+  # ---------------------------------------------------------------------------
+  construire:
+    name: Image
+    runs-on: ubuntu-latest
+    needs: verifier
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -23,122 +59,190 @@ jobs:
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
-      - name: Build and push
-        uses: docker/build-push-action@v5
+      - name: Construire et publier
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
           push: true
+          platforms: linux/amd64
+          # `latest` designe ce qui tourne ; l'empreinte du commit donne un point
+          # de retour precis.
           tags: |
             ${{ env.APP_IMAGE }}:latest
             ${{ env.APP_IMAGE }}:${{ github.sha }}
-          platforms: linux/amd64
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  deploy:
-    name: Deploy to server
+  # ---------------------------------------------------------------------------
+  # Socle : reseau, mandataire, repertoire persistant
+  # ---------------------------------------------------------------------------
+  socle:
+    name: Socle
     runs-on: ubuntu-latest
-    needs: [build]
+    needs: verifier
     steps:
-      - name: Deploy application
-        uses: appleboy/ssh-action@master
+      - name: Preparer le serveur
+        uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.SSH_HOST }}
-          username: ${{ secrets.SERVER_USER }}
+          username: ${{ secrets.SSH_USER }}
           password: ${{ secrets.SSH_PASSWORD }}
-          key: ${{ secrets.SSH_KEY }}
           port: ${{ secrets.SSH_PORT || 22 }}
           script: |
-            set -e
-            echo "🚀 Deploying Kronova..."
+            set -euo pipefail
 
-            docker network create proxy-tier 2>/dev/null || echo "Network proxy-tier already exists"
+            echo "▸ Reseau partage"
+            docker network create proxy-tier 2>/dev/null || true
 
-            # Même infrastructure TLS que Meet 237 : nginx-proxy termine le HTTPS.
-            # Sans lui le conteneur serait sain mais le site injoignable — on échoue ici.
-            if ! docker ps --format '{{.Names}}' | grep -qx nginx-proxy; then
-              echo "❌ nginx-proxy n'est pas démarré — le site serait injoignable."
+            echo "▸ Mandataire et certificats"
+            docker ps --format '{{.Names}}' | grep -q '^nginx-proxy$' \
+              || { echo "nginx-proxy absent : le site serait injoignable"; exit 1; }
+            docker ps --format '{{.Names}}' | grep -q 'acme' \
+              || echo "  avertissement : le compagnon Let's Encrypt ne tourne pas (pas de HTTPS)"
+
+            echo "▸ Repertoire de donnees"
+            # La connexion se fait par mot de passe : un `sudo` qui attend une
+            # saisie bloquerait le deploiement jusqu'a expiration.
+            if [ "$(id -u)" -eq 0 ]; then
+              ELEVER=""
+            elif sudo -n true 2>/dev/null; then
+              ELEVER="sudo"
+            elif [ -d ${{ env.DATA_DIR }} ] && [ -w ${{ env.DATA_DIR }} ]; then
+              ELEVER="skip"
+            else
+              echo "Impossible de creer ${{ env.DATA_DIR }} sans mot de passe. En root, une fois :"
+              echo "  mkdir -p ${{ env.DATA_DIR }} && chown -R 1000:1000 /var/kronova"
               exit 1
             fi
-
-            # Certificat : posé à la main (Cloudflare Origin CA) ou émis par acme-companion
-            # grâce à LETSENCRYPT_HOST. Absent au premier déploiement = avertissement seulement.
-            CERTS=$(docker inspect nginx-proxy \
-              --format '{{range .Mounts}}{{if eq .Destination "/etc/nginx/certs"}}{{.Source}}{{end}}{{end}}')
-            if [ -n "$CERTS" ] && command -v openssl >/dev/null 2>&1; then
-              crt="$CERTS/${{ env.APP_DOMAIN }}.crt"
-              if [ ! -f "$crt" ]; then
-                echo "⚠️ Aucun certificat pour ${{ env.APP_DOMAIN }} dans $CERTS (voir DEPLOY.md)"
-              elif ! openssl x509 -checkend 0 -noout -in "$crt" >/dev/null 2>&1; then
-                echo "❌ Certificat EXPIRÉ pour ${{ env.APP_DOMAIN }} — $(openssl x509 -enddate -noout -in "$crt")"
-                exit 1
-              elif ! openssl x509 -checkend 2592000 -noout -in "$crt" >/dev/null 2>&1; then
-                echo "⚠️ Certificat ${{ env.APP_DOMAIN }} expire sous 30 jours"
-              else
-                echo "✅ Certificat ${{ env.APP_DOMAIN }} OK"
-              fi
+            if [ "$ELEVER" != skip ]; then
+              $ELEVER mkdir -p ${{ env.DATA_DIR }}
+              # 1000 : compte `node` sans privileges de l'image
+              $ELEVER chown -R 1000:1000 /var/kronova
+              $ELEVER chmod -R 750 /var/kronova
             fi
 
-            sudo mkdir -p /var/kronova/data
-            sudo chown -R 1000:1000 /var/kronova/data
+            echo "✓ Socle pret"
 
-            docker pull ${{ env.APP_IMAGE }}:${{ github.sha }}
-            docker rm -f kronova-app 2>/dev/null || true
+  # ---------------------------------------------------------------------------
+  # Mise en service, avec retour arriere en cas d'echec
+  # ---------------------------------------------------------------------------
+  deployer:
+    name: Application
+    runs-on: ubuntu-latest
+    needs: [construire, socle]
+    steps:
+      - name: Mettre en service
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: ${{ secrets.SSH_PORT || 22 }}
+          command_timeout: 10m
+          script: |
+            set -euo pipefail
 
-            docker run -d \
-              --name kronova-app \
-              --restart unless-stopped \
-              --network proxy-tier \
-              --user 1000:1000 \
-              -e VIRTUAL_HOST=${{ env.APP_DOMAIN }},${{ env.WWW_DOMAIN }} \
-              -e VIRTUAL_PORT=3000 \
-              -e LETSENCRYPT_HOST=${{ env.APP_DOMAIN }},${{ env.WWW_DOMAIN }} \
-              -e LETSENCRYPT_EMAIL=${{ secrets.ADMIN_EMAIL }} \
-              -e NODE_ENV=production \
-              -e PORT=3000 \
-              -e TRUST_PROXY=true \
-              -e APP_URL=https://${{ env.APP_DOMAIN }} \
-              -e MONGODB_URI="${{ secrets.MONGODB_URI }}" \
-              -e MONGODB_DB=${{ secrets.MONGODB_DB || 'kronova' }} \
-              -e GEMINI_API_KEY="${{ secrets.GEMINI_API_KEY }}" \
-              -e SIGNUP_CODE="${{ secrets.SIGNUP_CODE }}" \
-              -e ALLOWED_EMAIL_DOMAINS="${{ secrets.ALLOWED_EMAIL_DOMAINS }}" \
-              -e GOOGLE_CLIENT_ID="${{ secrets.GOOGLE_CLIENT_ID }}" \
-              -v /var/kronova/data:/app/data \
-              ${{ env.APP_IMAGE }}:${{ github.sha }}
+            NOUVELLE='${{ env.APP_IMAGE }}:${{ github.sha }}'
+            PRECEDENTE=$(docker inspect -f '{{.Config.Image}}' ${{ env.APP_CONTAINER }} 2>/dev/null || echo '')
+            echo "▸ Version en place : ${PRECEDENTE:-aucune}"
 
-            echo "⏳ Waiting for Kronova to become healthy..."
-            for i in $(seq 1 30); do
-              STATUS=$(docker inspect -f '{{.State.Health.Status}}' kronova-app 2>/dev/null || echo starting)
-              if [ "$STATUS" = "healthy" ]; then
-                echo "✅ Kronova healthy"
-                break
-              fi
-              if [ "$i" = "30" ]; then
-                echo "❌ Kronova unhealthy after 150s"
-                docker logs --tail 50 kronova-app
-                exit 1
-              fi
-              sleep 5
+            docker pull "$NOUVELLE"
+
+            demarrer() {
+              docker rm -f ${{ env.APP_CONTAINER }} 2>/dev/null || true
+              docker run -d \
+                --name ${{ env.APP_CONTAINER }} \
+                --network proxy-tier \
+                --restart unless-stopped \
+                --user 1000:1000 \
+                -e VIRTUAL_HOST='${{ env.WEB_HOST }},www.${{ env.WEB_HOST }}' \
+                -e VIRTUAL_PORT=3000 \
+                -e LETSENCRYPT_HOST='${{ env.WEB_HOST }},www.${{ env.WEB_HOST }}' \
+                -e LETSENCRYPT_EMAIL='${{ secrets.LETSENCRYPT_EMAIL }}' \
+                -e NODE_ENV=production \
+                -e PORT=3000 \
+                -e TRUST_PROXY=true \
+                -e APP_URL='https://${{ env.WEB_HOST }}' \
+                -e MONGODB_URI='${{ secrets.MONGODB_URI }}' \
+                -e MONGODB_DB='${{ vars.MONGODB_DB || secrets.MONGODB_DB || 'kronova' }}' \
+                -e GEMINI_API_KEY='${{ secrets.GEMINI_API_KEY }}' \
+                -e SIGNUP_CODE='${{ secrets.SIGNUP_CODE }}' \
+                -e ALLOWED_EMAIL_DOMAINS='${{ vars.ALLOWED_EMAIL_DOMAINS || secrets.ALLOWED_EMAIL_DOMAINS }}' \
+                -e GOOGLE_CLIENT_ID='${{ vars.GOOGLE_CLIENT_ID || secrets.GOOGLE_CLIENT_ID }}' \
+                -v ${{ env.DATA_DIR }}:/app/data \
+                "$1"
+            }
+
+            echo "▸ Mise en service de $NOUVELLE"
+            demarrer "$NOUVELLE"
+
+            echo "▸ Attente de la sante"
+            saine=0
+            # La sonde attend aussi la connexion a MongoDB Atlas.
+            for i in $(seq 1 40); do
+              etat=$(docker inspect -f '{{.State.Health.Status}}' ${{ env.APP_CONTAINER }} 2>/dev/null || echo absent)
+              [ "$etat" = healthy ] && { saine=1; break; }
+              [ "$etat" = absent ] && break
+              sleep 3
             done
 
-            docker image prune -f >/dev/null
-
-  verify-deployment:
-    name: Verify deployment
-    runs-on: ubuntu-latest
-    needs: [deploy]
-    steps:
-      - name: Public health check
-        run: |
-          for i in $(seq 1 12); do
-            if curl -fsS https://${{ env.APP_DOMAIN }}/api/health; then
-              echo ""
-              echo "🎉 https://${{ env.APP_DOMAIN }} est en ligne"
+            if [ "$saine" -eq 1 ]; then
+              echo "✓ Kronova en service"
               exit 0
             fi
+
+            echo "✗ La nouvelle version ne repond pas"
+            docker logs --tail 80 ${{ env.APP_CONTAINER }} 2>&1 || true
+            if [ -n "$PRECEDENTE" ]; then
+              echo "▸ Retour a $PRECEDENTE"
+              demarrer "$PRECEDENTE"
+            else
+              echo "  aucune version precedente : le service reste indisponible"
+            fi
+            exit 1
+
+  # ---------------------------------------------------------------------------
+  # Verification depuis l'exterieur : certificat, mandataire et DNS compris
+  # ---------------------------------------------------------------------------
+  verifier-en-ligne:
+    name: Verification en ligne
+    runs-on: ubuntu-latest
+    needs: deployer
+    steps:
+      - name: Interroger l'adresse publique
+        run: |
+          for i in $(seq 1 18); do
+            if curl -fsS --max-time 10 https://${{ env.WEB_HOST }}/api/health; then
+              echo ""
+              echo "✓ https://${{ env.WEB_HOST }} est en ligne (image ${{ github.sha }})"
+              exit 0
+            fi
+            # Le premier certificat Let's Encrypt peut prendre une a deux minutes
             sleep 10
           done
-          echo "⚠️ Conteneur sain mais https://${{ env.APP_DOMAIN }} injoignable (DNS / certificat ?)"
+          echo "✗ Conteneur sain mais https://${{ env.WEB_HOST }} injoignable (DNS ou certificat ?)"
+          curl -sI --max-time 10 http://${{ env.WEB_HOST }}/api/health || true
           exit 1
+
+  # ---------------------------------------------------------------------------
+  # Menage
+  # ---------------------------------------------------------------------------
+  nettoyer:
+    name: Menage
+    runs-on: ubuntu-latest
+    needs: verifier-en-ligne
+    if: always()
+    steps:
+      - name: Retirer les images inutilisees
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: ${{ secrets.SSH_PORT || 22 }}
+          script: |
+            # Uniquement les images sans conteneur et de plus de sept jours : la
+            # version precedente reste disponible pour un retour arriere, et les
+            # images de MboaPass et d'Akademika en service ne sont pas touchees.
+            docker image prune -af --filter 'until=168h' || true
