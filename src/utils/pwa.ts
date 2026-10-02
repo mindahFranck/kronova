@@ -67,10 +67,19 @@ export function registerServiceWorker(options: RegisterServiceWorkerOptions = {}
     }
   };
 
-  if (document.readyState === 'complete') {
+  // Après `load` pour ne pas concurrencer le premier affichage, mais sans l'attendre
+  // indéfiniment : sur une connexion lente, `load` peut arriver très tard.
+  let started = false;
+  const start = () => {
+    if (started) return;
+    started = true;
     void register();
+  };
+  if (document.readyState === 'complete') {
+    start();
   } else {
-    window.addEventListener('load', () => void register(), { once: true });
+    window.addEventListener('load', start, { once: true });
+    window.setTimeout(start, 4000);
   }
 }
 

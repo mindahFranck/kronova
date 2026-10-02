@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import express from 'express';
+import compression from 'compression';
 import http from 'http';
 import path from 'path';
 import fs from 'fs';
@@ -554,6 +555,8 @@ async function startServer() {
   const app = express();
   // Derrière un reverse proxy (Caddy en production) : vraie IP client pour la limitation
   if (process.env.TRUST_PROXY === 'true') app.set('trust proxy', 1);
+  // Compression gzip (le flux /api/user/stream déclare no-transform et n'est pas compressé)
+  app.use(compression());
   app.use(express.json({ limit: '2mb' }));
 
   // Wrap async handlers so DB errors return 500 instead of crashing
@@ -1165,7 +1168,13 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.resolve(process.cwd(), 'dist');
-    app.use(express.static(distPath));
+    // Fichiers hachés par Vite : immuables, mis en cache un an. Le reste (index.html, sw.js,
+    // manifest) est revalidé à chaque visite pour que les mises à jour arrivent tout de suite.
+    app.use(
+      '/assets',
+      express.static(path.join(distPath, 'assets'), { immutable: true, maxAge: '1y', index: false })
+    );
+    app.use(express.static(distPath, { maxAge: 0 }));
     app.get('*', (_req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
     });

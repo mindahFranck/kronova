@@ -1,7 +1,7 @@
 /* Kronova — service worker (sans dépendance).
  * Incrémenter CACHE_VERSION à chaque changement de l'app shell précaché.
  */
-const CACHE_VERSION = 'v1';
+const CACHE_VERSION = 'v2';
 const SHELL_CACHE = `kronova-shell-${CACHE_VERSION}`;
 const ASSETS_CACHE = `kronova-assets-${CACHE_VERSION}`;
 const KNOWN_CACHES = [SHELL_CACHE, ASSETS_CACHE];
